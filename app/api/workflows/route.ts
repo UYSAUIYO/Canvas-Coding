@@ -5,6 +5,9 @@ import { NextResponse } from 'next/server'
 export async function GET() {
   try {
     const userId = await getCurrentUserId()
+    if (!userId) {
+      return NextResponse.json({ error: '请先登录' }, { status: 401 })
+    }
     const workflows = await prisma.workflow.findMany({
       where: { deletedAt: null, userId },
       orderBy: { updatedAt: 'desc' },
@@ -13,8 +16,9 @@ export async function GET() {
 
     return NextResponse.json(workflows)
   } catch (error) {
-    console.error('Get workflows error:', error)
-    return NextResponse.json({ error: '获取工作流列表失败' }, { status: 500 })
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('Get workflows error:', message)
+    return NextResponse.json({ error: message || '获取工作流列表失败' }, { status: 500 })
   }
 }
 

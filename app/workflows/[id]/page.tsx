@@ -7,14 +7,9 @@ import type { NodeType } from '@canvas/shared/types'
 import Canvas from '@/components/flow/Canvas'
 import Toolbox from '@/components/flow/Toolbox'
 import AiSidebar from '@/components/flow/AiSidebar'
+import PromptPanel from '@/components/flow/PromptPanel'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Settings, Sparkles, Loader2, Download } from 'lucide-react'
+import { Settings, Sparkles, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
 interface ProgressEvent {
   type: string
@@ -22,10 +17,15 @@ interface ProgressEvent {
   nodeLabel?: string
   nodeType?: string
   output?: string
+  text?: string
   stepIndex?: number
   totalSteps?: number
   progress?: number
   error?: string
+  layerIndex?: number
+  totalLayers?: number
+  nodeCount?: number
+  nodeLabels?: string[]
 }
 
 export default function WorkflowEditorPage() {
@@ -42,8 +42,11 @@ export default function WorkflowEditorPage() {
   const [genProgress, setGenProgress] = useState(0)
   const [genStatus, setGenStatus] = useState('')
   const [genOutput, setGenOutput] = useState('')
-  const [genDialogOpen, setGenDialogOpen] = useState(false)
   const genOutputRef = useRef('')
+
+  // 面板开关
+  const [promptPanelOpen, setPromptPanelOpen] = useState(false)
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false)
 
   // 一键导出 Markdown
   const handleDownloadMd = useCallback(() => {
@@ -58,16 +61,13 @@ export default function WorkflowEditorPage() {
     URL.revokeObjectURL(url)
   }, [workflowId, genOutput])
 
-  // AI 侧边栏
-  const [aiSidebarOpen, setAiSidebarOpen] = useState(false)
-
-  // AI 生成节点回调：清空画布并逐个添加节点
+  // AI 生成节点回调
   const handleNodesGenerated = useCallback((newNodes: Node[], newEdges: Edge[]) => {
     setNodes(newNodes)
     setEdges(newEdges)
   }, [])
 
-  // 构建 Provider 信息（从 localStorage 读取当前选中平台和 Key）
+  // 构建 Provider 信息
   const getProviderBody = useCallback(() => {
     const selectedProvider = localStorage.getItem('llm_selected_provider') || 'openai'
     const customProviders = (() => {
@@ -93,12 +93,13 @@ export default function WorkflowEditorPage() {
   }, [])
 
   const handleGenerate = useCallback(async () => {
+    // 打开 Prompt 面板
+    setPromptPanelOpen(true)
     setGenerating(true)
     setGenProgress(0)
     setGenStatus('准备中...')
     setGenOutput('')
     genOutputRef.current = ''
-    setGenDialogOpen(true)
 
     const apiKey = localStorage.getItem('llm_api_key')
     if (!apiKey && !localStorage.getItem('llm_anthropic_key') && !localStorage.getItem('llm_google_key')) {
@@ -146,15 +147,19 @@ export default function WorkflowEditorPage() {
             const event: ProgressEvent = JSON.parse(line.slice(6))
 
             switch (event.type) {
+              case 'layer-start':
+                setGenStatus(`第 ${event.layerIndex! + 1}/${event.totalLayers} 层 · 并行生成 ${event.nodeCount} 个节点: ${(event.nodeLabels ?? []).join(', ')}`)
+                break
               case 'node-start':
-                setGenStatus(`正在生成: ${event.nodeLabel} (${(event.stepIndex ?? 0) + 1}/${event.totalSteps})`)
-                setGenProgress(event.progress ?? 0)
+                genOutputRef.current += `\n\n## ${event.nodeLabel}\n\n`
+                setGenOutput(genOutputRef.current)
+                setGenStatus(`正在生成: ${event.nodeLabel}`)
+                break
+              case 'node-chunk':
+                genOutputRef.current += event.text || ''
+                setGenOutput(genOutputRef.current)
                 break
               case 'node-complete':
-                if (event.output) {
-                  genOutputRef.current += `\n\n## ${event.nodeLabel}\n\n${event.output}`
-                  setGenOutput(genOutputRef.current)
-                }
                 setGenProgress(event.progress ?? 0)
                 break
               case 'complete':
@@ -231,7 +236,7 @@ export default function WorkflowEditorPage() {
             onClick={() => setAiSidebarOpen(!aiSidebarOpen)}
           >
             <Sparkles className="mr-1 h-3 w-3" />
-            AI 生成
+            AI 设计
           </Button>
           <Button
             size="sm"
@@ -248,6 +253,14 @@ export default function WorkflowEditorPage() {
           >
             {generating ? `生成中 ${genProgress}%` : '生成 Prompt'}
           </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            title={promptPanelOpen ? '隐藏输出面板' : '显示输出面板'}
+            onClick={() => setPromptPanelOpen(!promptPanelOpen)}
+          >
+            {promptPanelOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
         </div>
       </header>
 
@@ -257,7 +270,7 @@ export default function WorkflowEditorPage() {
         <Toolbox onDragStart={onDragStart} />
 
         {/* 中间画布 */}
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <Canvas
             workflowId={workflowId}
             initialNodes={nodes}
@@ -265,7 +278,18 @@ export default function WorkflowEditorPage() {
           />
         </div>
 
-        {/* 右侧 AI 侧边栏 */}
+        {/* 右侧 Prompt 输出面板 (50% 宽度) */}
+        <PromptPanel
+          isOpen={promptPanelOpen}
+          onClose={() => setPromptPanelOpen(false)}
+          generating={generating}
+          genProgress={genProgress}
+          genStatus={genStatus}
+          genOutput={genOutput}
+          onDownloadMd={handleDownloadMd}
+        />
+
+        {/* AI 设计侧边栏（浮在最右侧） */}
         <AiSidebar
           workflowId={workflowId}
           nodes={nodes}
@@ -275,53 +299,6 @@ export default function WorkflowEditorPage() {
           onNodesGenerated={handleNodesGenerated}
         />
       </div>
-
-      {/* 生成结果对话框 */}
-      <Dialog open={genDialogOpen} onOpenChange={setGenDialogOpen}>
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>生成 Prompt</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-4">
-            {generating && (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-500">{genStatus}</span>
-                  <span className="text-gray-400">{genProgress}%</span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-                  <div
-                    className="h-full rounded-full bg-blue-500 transition-all duration-300"
-                    style={{ width: `${genProgress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-            {!generating && genStatus && (
-              <p className="text-sm text-gray-500">{genStatus}</p>
-            )}
-            {genOutput && (
-              <div className="max-h-[50vh] overflow-y-auto rounded-lg border bg-gray-50 p-4">
-                <pre className="whitespace-pre-wrap font-mono text-xs text-gray-800 leading-relaxed">
-                  {genOutput}
-                </pre>
-              </div>
-            )}
-            {genOutput && !generating && (
-              <div className="flex justify-end">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={handleDownloadMd}
-                >
-                  <Download className="mr-1 h-3 w-3" />
-                  导出 Markdown
-                </Button>
-              </div>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

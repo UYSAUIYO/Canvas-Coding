@@ -40,11 +40,19 @@ export default function DashboardPage() {
   const { data: session } = useSession()
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     fetch('/api/workflows')
       .then((res) => res.json())
-      .then(setWorkflows)
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setWorkflows(data)
+        } else {
+          setError(data?.error || '获取工作流列表失败')
+          setWorkflows([])
+        }
+      })
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [])
@@ -87,7 +95,15 @@ export default function DashboardPage() {
 
       <Separator className="mb-6" />
 
-      {loading ? (
+      {error ? (
+        <div className="rounded-md border border-red-200 bg-red-50 p-4">
+          <p className="text-sm font-medium text-red-700">加载失败</p>
+          <p className="mt-1 text-sm text-red-600">{error}</p>
+          <Button variant="outline" size="sm" className="mt-3" onClick={() => { setError(''); setLoading(true); window.location.reload() }}>
+            重试
+          </Button>
+        </div>
+      ) : loading ? (
         <p className="text-sm text-gray-400">加载中...</p>
       ) : workflows.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">

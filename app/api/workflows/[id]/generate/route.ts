@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUserId } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import { resolveModel } from "@/lib/model-provider";
-import { generateText } from "ai";
+import { streamText } from "ai";
 
 // 11 个内置 Agent 的 System Prompt（与 Mastra agents/index.ts 保持一致）
 const BUILTIN_INSTRUCTIONS: Record<string, string> = {
@@ -123,39 +123,30 @@ const BUILTIN_INSTRUCTIONS: Record<string, string> = {
 请输出一份完整、专业、可直接交付的工程项目 Prompt 文档，markdown 格式。`,
 };
 
-function topologicalSort(
+/**
+ * 按依赖深度分层：同一层内无依赖关系的节点可并行执行
+ */
+function computeLayers(
   nodes: { id: string; type: string; label: string; config: Record<string, unknown> }[],
   edges: { source: string; target: string }[]
 ) {
-  const adj = new Map<string, string[]>();
-  const inDegree = new Map<string, number>();
+  const processed = new Set<string>();
+  const layers: typeof nodes[] = [];
 
-  for (const n of nodes) {
-    adj.set(n.id, []);
-    inDegree.set(n.id, 0);
+  while (processed.size < nodes.length) {
+    // 当前层的节点：所有上游节点都已被处理
+    const layer = nodes.filter(
+      (n) =>
+        !processed.has(n.id) &&
+        edges
+          .filter((e) => e.target === n.id)
+          .every((e) => processed.has(e.source))
+    );
+    if (layer.length === 0) break; // 环检测
+    layers.push(layer);
+    layer.forEach((n) => processed.add(n.id));
   }
-  for (const e of edges) {
-    adj.get(e.source)?.push(e.target);
-    inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1);
-  }
-
-  const queue: string[] = [];
-  for (const [id, deg] of inDegree) {
-    if (deg === 0) queue.push(id);
-  }
-
-  const sorted: typeof nodes = [];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const node = nodes.find((n) => n.id === current);
-    if (node) sorted.push(node);
-    for (const neighbor of adj.get(current) || []) {
-      const nd = (inDegree.get(neighbor) || 1) - 1;
-      inDegree.set(neighbor, nd);
-      if (nd === 0) queue.push(neighbor);
-    }
-  }
-  return sorted;
+  return layers;
 }
 
 export async function POST(
@@ -222,9 +213,12 @@ export async function POST(
       target: e.targetNodeId,
     }));
 
-    const sorted = topologicalSort(nodes, edges);
-
+    // 分层：同层节点可并行执行
+    const layers = computeLayers(nodes, edges);
     const upstreamOutputs: Record<string, string> = {};
+    const totalCount = nodes.length;
+    let completedCount = 0;
+    const flatSorted: typeof nodes = [];
 
     // SSE stream
     const encoder = new TextEncoder();
@@ -237,86 +231,107 @@ export async function POST(
         };
 
         try {
-          for (let i = 0; i < sorted.length; i++) {
-            const node = sorted[i];
+          for (let layerIdx = 0; layerIdx < layers.length; layerIdx++) {
+            const layer = layers[layerIdx];
 
-            // 通知前端当前节点开始处理
+            // 通知前端当前层开始
             send({
-              type: "node-start",
-              nodeId: node.id,
-              nodeLabel: node.label,
-              nodeType: node.type,
-              stepIndex: i,
-              totalSteps: sorted.length,
+              type: "layer-start",
+              layerIndex: layerIdx,
+              totalLayers: layers.length,
+              nodeCount: layer.length,
+              nodeLabels: layer.map((n) => n.label),
             });
 
-            // 获取上游上下文
-            const upstreamIds = edges
-              .filter((e) => e.target === node.id)
-              .map((e) => e.source);
-
-            let contextPrefix = "";
-            if (upstreamIds.length > 0) {
-              const upstreamTexts = upstreamIds
-                .filter((uid) => upstreamOutputs[uid])
-                .map((uid) => upstreamOutputs[uid]);
-              if (upstreamTexts.length > 0) {
-                contextPrefix =
-                  "## 上游节点的输出\n\n" +
-                  upstreamTexts.join("\n\n---\n\n") +
-                  "\n\n---\n\n";
-              }
-            }
-
-            // 获取 Agent instructions
-            let instructions = BUILTIN_INSTRUCTIONS[node.type] || "";
-            const agentId = node.config.agentId as string | undefined;
-
-            if (agentId) {
-              const agent = await prisma.agent.findUnique({
-                where: { id: agentId },
+            // 同层节点并行执行 + 流式输出
+            await Promise.all(layer.map(async (node) => {
+              send({
+                type: "node-start",
+                nodeId: node.id,
+                nodeLabel: node.label,
+                nodeType: node.type,
+                stepIndex: completedCount,
+                totalSteps: totalCount,
               });
-              if (agent) {
-                instructions = agent.instructions;
-              }
-            }
 
-            const prompt = `${contextPrefix}## 当前节点：${node.label}
+              // 获取上游上下文
+              const upstreamIds = edges
+                .filter((e) => e.target === node.id)
+                .map((e) => e.source);
+
+              let contextPrefix = "";
+              if (upstreamIds.length > 0) {
+                const upstreamTexts = upstreamIds
+                  .filter((uid) => upstreamOutputs[uid])
+                  .map((uid) => upstreamOutputs[uid]);
+                if (upstreamTexts.length > 0) {
+                  contextPrefix =
+                    "## 上游节点的输出\n\n" +
+                    upstreamTexts.join("\n\n---\n\n") +
+                    "\n\n---\n\n";
+                }
+              }
+
+              // 获取 Agent instructions
+              let instructions = BUILTIN_INSTRUCTIONS[node.type] || "";
+              const agentId = node.config.agentId as string | undefined;
+              if (agentId) {
+                const agent = await prisma.agent.findUnique({
+                  where: { id: agentId },
+                });
+                if (agent) {
+                  instructions = agent.instructions;
+                }
+              }
+
+              const prompt = `${contextPrefix}## 当前节点：${node.label}
 
 节点类型: ${node.type}
 节点配置: ${JSON.stringify(node.config, null, 2)}
 
 请根据上述配置和上下游上下文，生成该节点对应的详细实现方案。`;
 
-            const { text } = await generateText({
-              model,
-              system: instructions,
-              prompt,
-            });
+              // streamText: 流式输出，前端实时看到内容
+              const { textStream } = streamText({
+                model,
+                system: instructions,
+                prompt,
+              });
 
-            const section = `## ${node.label}\n\n${text}`;
-            upstreamOutputs[node.id] = section;
+              let fullText = "";
+              for await (const chunk of textStream) {
+                fullText += chunk;
+                send({
+                  type: "node-chunk",
+                  nodeId: node.id,
+                  nodeLabel: node.label,
+                  text: chunk,
+                });
+              }
 
-            // 通知前端当前节点完成
-            send({
-              type: "node-complete",
-              nodeId: node.id,
-              nodeLabel: node.label,
-              nodeType: node.type,
-              output: text,
-              stepIndex: i,
-              totalSteps: sorted.length,
-              progress: Math.round(((i + 1) / sorted.length) * 100),
-            });
+              upstreamOutputs[node.id] = `## ${node.label}\n\n${fullText}`;
+              flatSorted.push(node);
+              completedCount++;
+
+              send({
+                type: "node-complete",
+                nodeId: node.id,
+                nodeLabel: node.label,
+                nodeType: node.type,
+                stepIndex: completedCount,
+                totalSteps: totalCount,
+                progress: Math.round((completedCount / totalCount) * 100),
+              });
+            }));
           }
 
           // 聚合最终结果
           let finalOutput: string;
-          const lastNode = sorted[sorted.length - 1];
+          const lastNode = flatSorted[flatSorted.length - 1];
           if (lastNode && lastNode.type === "output") {
             finalOutput = upstreamOutputs[lastNode.id] || "";
           } else {
-            finalOutput = sorted
+            finalOutput = flatSorted
               .map((n) => upstreamOutputs[n.id])
               .filter(Boolean)
               .join("\n\n---\n\n");
