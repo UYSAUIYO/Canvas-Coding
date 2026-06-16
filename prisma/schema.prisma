@@ -1,0 +1,146 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ============================================================
+// 用户
+// ============================================================
+model User {
+  id        String    @id @default(cuid())
+  name      String?
+  email     String    @unique
+  password  String?   // bcrypt hashed, nullable for OAuth
+  avatar    String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  accounts  Account[]
+  sessions  Session[]
+  workflows Workflow[]
+  agents    Agent[]
+}
+
+// ============================================================
+// 工作流
+// ============================================================
+model Workflow {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String    @default("未命名工作流")
+  description String?   @db.Text
+  thumbnail   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime? // 软删除
+
+  user     User              @relation(fields: [userId], references: [id])
+  nodes    WorkflowNode[]
+  edges    WorkflowEdge[]
+  versions WorkflowVersion[]
+}
+
+// ============================================================
+// 智能体 (AI Agent)
+// ============================================================
+model Agent {
+  id           String   @id @default(cuid())
+  name         String                              // 智能体名称
+  description  String?                             // 简介
+  icon         String   @default("🤖")            // emoji 图标
+  instructions String   @db.Text                   // System Prompt
+  model        String   @default("gpt-5.5")        // 模型名称
+  isBuiltIn    Boolean  @default(false)            // 是否为内置（内置不可删除）
+  nodeType     String?                             // 绑定的节点类型
+  userId       String                              // 所属用户
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([nodeType])
+}
+
+// ============================================================
+// 工作流节点
+// ============================================================
+model WorkflowNode {
+  id         String @id @default(cuid())
+  workflowId String
+  type       String // project | module | generate | validate | condition | output
+  label      String
+  positionX  Float
+  positionY  Float
+  config     Json   // 节点配置 (JSON)
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================
+// 工作流边
+// ============================================================
+model WorkflowEdge {
+  id           String  @id @default(cuid())
+  workflowId   String
+  sourceNodeId String
+  targetNodeId String
+  label        String?
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================
+// 工作流版本快照
+// ============================================================
+model WorkflowVersion {
+  id         String   @id @default(cuid())
+  workflowId String
+  snapshot   Json     // 完整 DAG 快照
+  createdAt  DateTime @default(now())
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================
+// NextAuth v4 所需模型
+// ============================================================
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
